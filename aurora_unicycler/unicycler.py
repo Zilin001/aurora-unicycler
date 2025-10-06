@@ -50,7 +50,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any, Literal
 from xml.dom import minidom
 
@@ -1211,21 +1211,73 @@ class Protocol(BaseModel):
         self._validate_capacity_c_rates()
         self.tag_to_indices()
 
+        resolved_path = save_path.resolve() if save_path else None
+        if resolved_path and resolved_path.drive:
+            filename_str = str(PureWindowsPath(resolved_path))
+        elif resolved_path:
+            windows_path = PureWindowsPath(resolved_path)
+            filename_str = f"\\\\wsl.localhost\\Ubuntu{windows_path}"
+        else:
+            filename_str = ""
+
+        safety_lines = ["Safety Limits :"]
+        if self.safety.min_voltage_V is not None:
+            safety_lines.append(f"\tEcell min = {float(self.safety.min_voltage_V):.2f} V")
+        if self.safety.max_voltage_V is not None:
+            safety_lines.append(f"\tEcell max = {float(self.safety.max_voltage_V):.2f} V")
+        max_abs_current = max(
+            abs(float(self.safety.max_current_mA))
+            if self.safety.max_current_mA is not None
+            else 0.0,
+            abs(float(self.safety.min_current_mA))
+            if self.safety.min_current_mA is not None
+            else 0.0,
+        )
+        if max_abs_current:
+            safety_lines.append(f"\t|I| = {max_abs_current:.3f} mA")
+            safety_lines.append("\tfor t > 2 ms")
+        safety_lines.append("\tTemperature max = 55.00 °C")
+
         header = [
             "BT-LAB SETTING FILE",
             "",
             "Number of linked techniques : 1",
-            "Device : BCS-810",
-            "Ecell ctrl range : min = 0.00 V, max = 5.00 V",
-            "Safety Limits :",
-            "\tDo not start on E overload",
-            f"Comments : {self.sample.name}",
+            "",
+            "BT-LAB for windows v1.81 (software)",
+            "Internet server v0.00 (firmware)",
+            "Command interpretor v0.00 (firmware)",
+            "",
+            f"Filename : {filename_str}",
+            "",
+            "Device : BCS-815",
+            "Ecell ctrl range : min = 0.00 V, max = 9.00 V",
+            *safety_lines,
+            "Electrode material : ",
+            "Initial state : ",
+            "Electrolyte : ",
+            "Comments : ",
+            "Mass of active material : 0.001 mg",
+            " at x = 0.000",
+            "Molecular weight of active material (at x = 0) : 0.001 g/mol",
+            "Atomic weight of intercalated ion : 0.001 g/mol",
+            "Acquisition started at : xo = 0.000",
+            "Number of e- transfered per intercalated ion : 1",
+            "for DX = 1, DQ = 26.802 mA.h",
+            "Battery capacity : 0.000 A.h",
+            "Electrode surface area : 0.000 cm²",
+            "Characteristic mass : 0.001 g",
+            "Volume (V) : 0.001 cm³",
             "Cycle Definition : Charge/Discharge alternance",
             "Turn to OCV between techniques",
             "",
             "Technique : 1",
             "Modulo Bat",
         ]
+
+        record_time_str = f"{float(self.record.time_s):.3f}" if self.record.time_s else ""
+        record_voltage_str = (
+            f"{float(self.record.voltage_V):.3f}" if self.record.voltage_V is not None else ""
+        )
 
         default_step = {
             "Ns": "",
@@ -1241,7 +1293,7 @@ class Protocol(BaseModel):
             "ctrl3_val": "",
             "ctrl3_val_unit": "",
             "ctrl3_val_vs": "",
-            "N": "0.00",
+            "N": "1.00",
             "charge/discharge": "Charge",
             "charge/discharge_1": "Charge",
             "Apply I/C_1": "I",
@@ -1258,38 +1310,38 @@ class Protocol(BaseModel):
             "ctrl_TO_t_unit": "d",
             "ctrl_Nd": "6",
             "ctrl_Na": "1",
-            "ctrl_corr": "0",
+            "ctrl_corr": "1",
             "lim_nb": "0",
             "lim1_type": "Time",
             "lim1_comp": ">",
-            "lim1_Qprev_pct": "",
-            "lim1_Q": "",
+            "lim1_Qprev_pct": "100",
+            "lim1_Q": "Q limit",
             "lim1_value": "0.000",
             "lim1_value_unit": "s",
             "lim1_action": "Next sequence",
             "lim1_seq": "",
             "lim2_type": "",
             "lim2_comp": "",
-            "lim2_Qprev_pct": "",
-            "lim2_Q": "",
+            "lim2_Qprev_pct": "100",
+            "lim2_Q": "Q limit",
             "lim2_value": "",
             "lim2_value_unit": "",
             "lim2_action": "Next sequence",
             "lim2_seq": "",
             "rec_nb": "0",
-            "rec1_type": "",
-            "rec1_value": "",
-            "rec1_value_unit": "",
-            "rec2_type": "",
-            "rec2_value": "",
-            "rec2_value_unit": "",
+            "rec1_type": "Time" if record_time_str else "",
+            "rec1_value": record_time_str,
+            "rec1_value_unit": "s" if record_time_str else "",
+            "rec2_type": "Ecell" if record_voltage_str else "",
+            "rec2_value": record_voltage_str,
+            "rec2_value_unit": "V" if record_voltage_str else "",
             "E range min (V)": "0.000",
-            "E range max (V)": "5.000",
+            "E range max (V)": "9.000",
             "I Range": "Auto",
             "I Range min": "Unset",
             "I Range max": "Unset",
             "I Range init": "Unset",
-            "auto rest": "0",
+            "auto rest": "1",
             "Bandwidth": "4",
         }
 
@@ -1302,6 +1354,7 @@ class Protocol(BaseModel):
         }
 
         step_dicts: list[dict[str, str]] = []
+        last_cc_snapshot: dict[str, str] | None = None
         for i, step in enumerate(self.method):
             step_dict = default_step.copy()
             step_dict.update({"Ns": str(i), "lim1_seq": str(i + 1), "lim2_seq": str(i + 1)})
@@ -1316,29 +1369,46 @@ class Protocol(BaseModel):
                             "lim1_comp": ">",
                             "lim1_Qprev_pct": "100",
                             "lim1_Q": "Q limit",
-                            "lim1_value": f"{step.until_time_s:.3f}",
+                            "lim1_value": f"{float(step.until_time_s):.3f}",
                             "lim1_value_unit": "s",
-                            "rec_nb": "1",
-                            "rec1_type": "Time",
-                            "rec1_value": f"{self.record.time_s or 0:.3f}",
-                            "rec1_value_unit": "s",
                         }
                     )
+                    rec_num = 0
+                    if self.record.time_s:
+                        rec_num += 1
+                        step_dict.update(
+                            {
+                                f"rec{rec_num}_type": "Time",
+                                f"rec{rec_num}_value": f"{float(self.record.time_s):.3f}",
+                                f"rec{rec_num}_value_unit": "s",
+                            }
+                        )
+                    if self.record.voltage_V is not None:
+                        rec_num += 1
+                        step_dict.update(
+                            {
+                                f"rec{rec_num}_type": "Ecell",
+                                f"rec{rec_num}_value": f"{float(self.record.voltage_V):.3f}",
+                                f"rec{rec_num}_value_unit": "V",
+                            }
+                        )
+                    step_dict.update({"rec_nb": str(rec_num)})
 
                 case ConstantCurrent():
                     if step.rate_C and self.sample.capacity_mAh:
-                        current_mA = step.rate_C * self.sample.capacity_mAh
-                    elif step.current_mA:
-                        current_mA = step.current_mA
+                        current_mA = float(step.rate_C) * float(self.sample.capacity_mAh)
+                    elif step.current_mA is not None:
+                        current_mA = float(step.current_mA)
                     else:
                         msg = "Either rate_C or current_mA must be set for ConstantCurrent step."
                         raise ValueError(msg)
 
-                    if abs(current_mA) < 1:
+                    magnitude_mA = abs(current_mA)
+                    if magnitude_mA < 1:
                         step_dict.update(
                             {
                                 "ctrl_type": "CC",
-                                "ctrl1_val": f"{current_mA * 1e3:.3f}",
+                                "ctrl1_val": f"{magnitude_mA * 1e3:.3f}",
                                 "ctrl1_val_unit": "uA",
                                 "ctrl1_val_vs": "<None>",
                             }
@@ -1347,14 +1417,20 @@ class Protocol(BaseModel):
                         step_dict.update(
                             {
                                 "ctrl_type": "CC",
-                                "ctrl1_val": f"{current_mA:.3f}",
+                                "ctrl1_val": f"{magnitude_mA:.3f}",
                                 "ctrl1_val_unit": "mA",
                                 "ctrl1_val_vs": "<None>",
                             }
                         )
 
+                    step_dict.update(
+                        {
+                            "charge/discharge": "Charge" if current_mA >= 0 else "Discharge",
+                        }
+                    )
+
                     for val, range_str in i_ranges_mA.items():
-                        if abs(current_mA) <= val:
+                        if magnitude_mA <= val:
                             step_dict.update({"I Range": range_str})
                             break
                     else:
@@ -1370,20 +1446,20 @@ class Protocol(BaseModel):
                                 f"lim{lim_num}_comp": ">",
                                 f"lim{lim_num}_Qprev_pct": "100",
                                 f"lim{lim_num}_Q": "Q limit",
-                                f"lim{lim_num}_value": f"{step.until_time_s:.3f}",
+                                f"lim{lim_num}_value": f"{float(step.until_time_s):.3f}",
                                 f"lim{lim_num}_value_unit": "s",
                             }
                         )
                     if step.until_voltage_V:
                         lim_num += 1
-                        comp = ">" if current_mA > 0 else "<"
+                        comp = ">" if current_mA >= 0 else "<"
                         step_dict.update(
                             {
                                 f"lim{lim_num}_type": "Ecell",
                                 f"lim{lim_num}_comp": comp,
                                 f"lim{lim_num}_Qprev_pct": "100",
                                 f"lim{lim_num}_Q": "Q limit",
-                                f"lim{lim_num}_value": f"{step.until_voltage_V:.3f}",
+                                f"lim{lim_num}_value": f"{float(step.until_voltage_V):.3f}",
                                 f"lim{lim_num}_value_unit": "V",
                             }
                         )
@@ -1395,26 +1471,53 @@ class Protocol(BaseModel):
                         step_dict.update(
                             {
                                 f"rec{rec_num}_type": "Time",
-                                f"rec{rec_num}_value": f"{self.record.time_s:.3f}",
+                                f"rec{rec_num}_value": f"{float(self.record.time_s):.3f}",
                                 f"rec{rec_num}_value_unit": "s",
                             }
                         )
-                    if self.record.voltage_V:
+                    if self.record.voltage_V is not None:
                         rec_num += 1
                         step_dict.update(
                             {
                                 f"rec{rec_num}_type": "Ecell",
-                                f"rec{rec_num}_value": f"{self.record.voltage_V:.3f}",
+                                f"rec{rec_num}_value": f"{float(self.record.voltage_V):.3f}",
                                 f"rec{rec_num}_value_unit": "V",
                             }
                         )
                     step_dict.update({"rec_nb": str(rec_num)})
 
+                    last_cc_snapshot = {
+                        key: step_dict[key]
+                        for key in [
+                            "ctrl1_val",
+                            "charge/discharge",
+                            "I Range",
+                            "lim1_type",
+                            "lim1_comp",
+                            "lim1_Qprev_pct",
+                            "lim1_Q",
+                            "lim1_value",
+                            "lim1_value_unit",
+                            "lim2_type",
+                            "lim2_comp",
+                            "lim2_Qprev_pct",
+                            "lim2_Q",
+                            "lim2_value",
+                            "lim2_value_unit",
+                            "rec1_type",
+                            "rec1_value",
+                            "rec1_value_unit",
+                            "rec2_type",
+                            "rec2_value",
+                            "rec2_value_unit",
+                        ]
+                    }
+
                 case ConstantVoltage():
                     step_dict.update(
                         {
                             "ctrl_type": "CV",
-                            "ctrl1_val": f"{step.voltage_V:.3f}",
+                            "ctrl1_val": f"{float(step.voltage_V):.3f}",
                             "ctrl1_val_unit": "V",
                             "ctrl1_val_vs": "Ref",
                         }
@@ -1428,15 +1531,15 @@ class Protocol(BaseModel):
                                 f"lim{lim_num}_type": "Time",
                                 f"lim{lim_num}_comp": ">",
                                 f"lim{lim_num}_Qprev_pct": "100",
-                                f"lim{lim_num}_Q": "Q limit",
-                                f"lim{lim_num}_value": f"{step.until_time_s:.3f}",
+                                f"lim{lim_num}_Q": "I limit",
+                                f"lim{lim_num}_value": f"{float(step.until_time_s):.3f}",
                                 f"lim{lim_num}_value_unit": "s",
                             }
                         )
                     if step.until_rate_C and self.sample.capacity_mAh:
-                        until_mA = step.until_rate_C * self.sample.capacity_mAh
+                        until_mA = float(step.until_rate_C) * float(self.sample.capacity_mAh)
                     elif step.until_current_mA:
-                        until_mA = step.until_current_mA
+                        until_mA = float(step.until_current_mA)
                     else:
                         until_mA = None
 
@@ -1447,7 +1550,7 @@ class Protocol(BaseModel):
                                 f"lim{lim_num}_type": "|I|",
                                 f"lim{lim_num}_comp": "<",
                                 f"lim{lim_num}_Qprev_pct": "100",
-                                f"lim{lim_num}_Q": "Q limit",
+                                f"lim{lim_num}_Q": "I limit",
                                 f"lim{lim_num}_value": f"{abs(until_mA):.3f}",
                                 f"lim{lim_num}_value_unit": "mA",
                             }
@@ -1460,17 +1563,17 @@ class Protocol(BaseModel):
                         step_dict.update(
                             {
                                 f"rec{rec_num}_type": "Time",
-                                f"rec{rec_num}_value": f"{self.record.time_s:.3f}",
+                                f"rec{rec_num}_value": f"{float(self.record.time_s):.3f}",
                                 f"rec{rec_num}_value_unit": "s",
                             }
                         )
-                    if self.record.current_mA:
+                    if self.record.voltage_V is not None:
                         rec_num += 1
                         step_dict.update(
                             {
-                                f"rec{rec_num}_type": "I",
-                                f"rec{rec_num}_value": f"{self.record.current_mA:.3f}",
-                                f"rec{rec_num}_value_unit": "mA",
+                                f"rec{rec_num}_type": "Ecell",
+                                f"rec{rec_num}_value": f"{float(self.record.voltage_V):.3f}",
+                                f"rec{rec_num}_value_unit": "V",
                             }
                         )
                     step_dict.update({"rec_nb": str(rec_num)})
@@ -1479,20 +1582,44 @@ class Protocol(BaseModel):
                     if step.amplitude_V:
                         step_dict.update({"ctrl_type": "PEIS"})
                         if step.amplitude_V >= 0.1:
-                            step_dict.update({"ctrl1_val": f"{step.amplitude_V:.3f}", "ctrl1_val_unit": "V"})
+                            step_dict.update(
+                                {"ctrl1_val": f"{step.amplitude_V:.3f}", "ctrl1_val_unit": "V"}
+                            )
                         elif step.amplitude_V >= 0.001:
-                            step_dict.update({"ctrl1_val": f"{step.amplitude_V * 1e3:.3f}", "ctrl1_val_unit": "mV"})
+                            step_dict.update(
+                                {
+                                    "ctrl1_val": f"{step.amplitude_V * 1e3:.3f}",
+                                    "ctrl1_val_unit": "mV",
+                                }
+                            )
                         else:
-                            step_dict.update({"ctrl1_val": f"{step.amplitude_V * 1e6:.3f}", "ctrl1_val_unit": "uV"})
+                            step_dict.update(
+                                {
+                                    "ctrl1_val": f"{step.amplitude_V * 1e6:.3f}",
+                                    "ctrl1_val_unit": "uV",
+                                }
+                            )
 
                     elif step.amplitude_mA:
                         step_dict.update({"ctrl_type": "GEIS"})
                         if step.amplitude_mA >= 1000:
-                            step_dict.update({"ctrl1_val": f"{step.amplitude_mA / 1000:.3f}", "ctrl1_val_unit": "A"})
+                            step_dict.update(
+                                {
+                                    "ctrl1_val": f"{step.amplitude_mA / 1000:.3f}",
+                                    "ctrl1_val_unit": "A",
+                                }
+                            )
                         elif step.amplitude_mA >= 1:
-                            step_dict.update({"ctrl1_val": f"{step.amplitude_mA:.3f}", "ctrl1_val_unit": "mA"})
+                            step_dict.update(
+                                {"ctrl1_val": f"{step.amplitude_mA:.3f}", "ctrl1_val_unit": "mA"}
+                            )
                         else:
-                            step_dict.update({"ctrl1_val": f"{step.amplitude_mA * 1000:.3f}", "ctrl1_val_unit": "uA"})
+                            step_dict.update(
+                                {
+                                    "ctrl1_val": f"{step.amplitude_mA * 1000:.3f}",
+                                    "ctrl1_val_unit": "uA",
+                                }
+                            )
 
                         for val, range_str in i_ranges_mA.items():
                             if abs(step.amplitude_mA) * 2 <= val:
@@ -1508,11 +1635,23 @@ class Protocol(BaseModel):
 
                     for freq, ctrl in ((step.start_frequency_Hz, 2), (step.end_frequency_Hz, 3)):
                         if freq >= 1e3:
-                            step_dict.update({f"ctrl{ctrl}_val": f"{freq / 1e3:.3f}", f"ctrl{ctrl}_val_unit": "kHz"})
+                            step_dict.update(
+                                {
+                                    f"ctrl{ctrl}_val": f"{freq / 1e3:.3f}",
+                                    f"ctrl{ctrl}_val_unit": "kHz",
+                                }
+                            )
                         elif freq >= 1:
-                            step_dict.update({f"ctrl{ctrl}_val": f"{freq:.3f}", f"ctrl{ctrl}_val_unit": "Hz"})
+                            step_dict.update(
+                                {f"ctrl{ctrl}_val": f"{freq:.3f}", f"ctrl{ctrl}_val_unit": "Hz"}
+                            )
                         elif freq >= 1e-3:
-                            step_dict.update({f"ctrl{ctrl}_val": f"{freq * 1e3:.3f}", f"ctrl{ctrl}_val_unit": "mHz"})
+                            step_dict.update(
+                                {
+                                    f"ctrl{ctrl}_val": f"{freq * 1e3:.3f}",
+                                    f"ctrl{ctrl}_val_unit": "mHz",
+                                }
+                            )
                     step_dict.update(
                         {
                             "ctrl_Nd": f"{step.points_per_decade}",
@@ -1521,6 +1660,28 @@ class Protocol(BaseModel):
                         }
                     )
 
+                    # Add recording parameters for EIS
+                    rec_num = 0
+                    if self.record.time_s:
+                        rec_num += 1
+                        step_dict.update(
+                            {
+                                f"rec{rec_num}_type": "Time",
+                                f"rec{rec_num}_value": f"{float(self.record.time_s):.3f}",
+                                f"rec{rec_num}_value_unit": "s",
+                            }
+                        )
+                    if self.record.voltage_V is not None:
+                        rec_num += 1
+                        step_dict.update(
+                            {
+                                f"rec{rec_num}_type": "Ecell",
+                                f"rec{rec_num}_value": f"{float(self.record.voltage_V):.3f}",
+                                f"rec{rec_num}_value_unit": "V",
+                            }
+                        )
+                    step_dict.update({"rec_nb": str(rec_num)})
+
                 case Loop():
                     assert isinstance(step.loop_to, int)
                     step_dict.update(
@@ -1528,8 +1689,35 @@ class Protocol(BaseModel):
                             "ctrl_type": "Loop",
                             "ctrl_seq": str(step.loop_to - 1),
                             "ctrl_repeat": str(step.cycle_count - 1),
+                            "lim_nb": "0",
+                            "rec_nb": "0",
                         }
                     )
+                    if last_cc_snapshot:
+                        for key in [
+                            "ctrl1_val",
+                            "charge/discharge",
+                            "I Range",
+                            "lim1_type",
+                            "lim1_comp",
+                            "lim1_Qprev_pct",
+                            "lim1_Q",
+                            "lim1_value",
+                            "lim1_value_unit",
+                            "lim2_type",
+                            "lim2_comp",
+                            "lim2_Qprev_pct",
+                            "lim2_Q",
+                            "lim2_value",
+                            "lim2_value_unit",
+                            "rec1_type",
+                            "rec1_value",
+                            "rec1_value_unit",
+                            "rec2_type",
+                            "rec2_value",
+                            "rec2_value_unit",
+                        ]:
+                            step_dict[key] = last_cc_snapshot.get(key, step_dict[key])
 
                 case _:
                     msg = f"to_btlab_mps() does not support step type: {step.step}"
@@ -1542,11 +1730,11 @@ class Protocol(BaseModel):
             row_data = [step[row_header] for step in step_dicts]
             rows.append(row_header.ljust(20) + "".join(d.ljust(20) for d in row_data))
 
-        settings_string = "\n".join([*header, *rows, ""])
+        settings_string = "\r\n".join([*header, *rows, ""])
 
         if save_path:
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            with save_path.open("w", encoding="utf-8") as f:
+            with save_path.open("w", encoding="cp1252") as f:
                 f.write(settings_string)
 
         return settings_string
